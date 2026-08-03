@@ -1,0 +1,29 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+vendor/
+
+# Runtime data and generated recordings
+recordings/
+logs/
+runtime/
+state/
+tmp-vnc/
+*.mp4
+*.webm
+*.wav
+
+# Temporary/debug artifacts
+*.log
+*.pid
+*.lock
+join-timeout.*
+.DS_Store

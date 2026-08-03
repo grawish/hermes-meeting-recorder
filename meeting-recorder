@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=/var/lib/hermes/meeting-recorder
+set -a
+# shellcheck disable=SC1091
+[ ! -f "$ROOT/.env" ] || . "$ROOT/.env"
+set +a
+export PYTHONPATH="$ROOT/vendor:/usr/local/lib/hermes-agent/venv/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+if [[ "${1:-}" == "auth-vnc" ]]; then
+  shift
+  exec "$ROOT/meet-auth-vnc" "${1:-start}"
+fi
+exec /usr/local/lib/hermes-agent/venv/bin/python "$ROOT/meeting_recorder.py" "$@"

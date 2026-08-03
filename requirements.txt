@@ -1,0 +1,4 @@
+# Runtime uses Python stdlib plus Hermes' bundled Google Workspace and Meet plugins.
+# Vendored for the Meet plugin because the system Hermes venv is read-only:
+playwright==1.61.0
+websockets==16.1.1

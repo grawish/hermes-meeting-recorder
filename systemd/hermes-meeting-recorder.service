@@ -1,0 +1,15 @@
+[Unit]
+Description=Hermes Google Meet calendar recorder
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/hermes/meeting-recorder
+EnvironmentFile=-/var/lib/hermes/meeting-recorder/.env
+ExecStart=/var/lib/hermes/meeting-recorder/meeting-recorder scheduler
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

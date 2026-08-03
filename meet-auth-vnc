@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=/var/lib/hermes/meeting-recorder
+STATE="$ROOT/tmp-vnc"
+DISPLAY_NUM=:97
+VNC_PORT=5997
+WEB_PORT=6097
+AUTH_FILE=/var/lib/hermes/.hermes/workspace/meetings/auth.json
+PASS_FILE="$STATE/passwd"
+INFO_FILE="$STATE/info"
+FIFO="$STATE/auth-input"
+AUTH_LOG="$STATE/auth.log"
+HERMES=/usr/local/lib/hermes-agent/venv/bin/hermes
+PYTHONPATH_VALUE="$ROOT/vendor:/usr/local/lib/hermes-agent/venv/lib/python3.11/site-packages"
+
+need() { command -v "$1" >/dev/null || { echo "missing required command: $1" >&2; exit 1; }; }
+pid_alive() { [[ -f "$STATE/$1.pid" ]] && kill -0 "$(cat "$STATE/$1.pid")" 2>/dev/null; }
+active() { pid_alive auth; }
+cleanup() {
+  for name in auth web vnc xvfb; do
+    if [[ -f "$STATE/$name.pid" ]]; then
+      pid="$(cat "$STATE/$name.pid")"
+      kill "$pid" 2>/dev/null || true
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -f "$PASS_FILE" "$INFO_FILE" "$FIFO" "$STATE"/*.pid
+}
+show_access() {
+  # shellcheck disable=SC1090
+  source "$INFO_FILE"
+  cat <<EOF
+Google Meet authentication desktop is ready.
+
+Open over Tailscale:
+  http://${TAILSCALE_IP}:${WEB_PORT}/vnc.html?host=${TAILSCALE_IP}&port=${WEB_PORT}
+
+VNC password:
+  ${VNC_PASSWORD}
+
+After signing in, save and close everything with:
+  $ROOT/meeting-recorder auth-vnc save
+
+To cancel instead:
+  $ROOT/meeting-recorder auth-vnc stop
+EOF
+}
+
+case "${1:-start}" in
+  start)
+    for cmd in Xvfb x11vnc websockify openssl tailscale; do need "$cmd"; done
+    if active; then
+      if [[ -f "$INFO_FILE" ]]; then show_access; exit 0; fi
+      cleanup
+    else
+      cleanup
+    fi
+    mkdir -p "$STATE"
+    chmod 700 "$STATE"
+    TAILSCALE_IP="$(tailscale ip -4 | head -n1)"
+    [[ -n "$TAILSCALE_IP" ]] || { echo "Tailscale IPv4 address unavailable" >&2; exit 1; }
+    VNC_PASSWORD="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)"
+    x11vnc -storepasswd "$VNC_PASSWORD" "$PASS_FILE" >/dev/null
+    chmod 600 "$PASS_FILE"
+    printf 'TAILSCALE_IP=%q\nVNC_PASSWORD=%q\n' "$TAILSCALE_IP" "$VNC_PASSWORD" > "$INFO_FILE"
+    chmod 600 "$INFO_FILE"
+
+    nohup Xvfb "$DISPLAY_NUM" -screen 0 1366x900x24 -ac -nolisten tcp >"$STATE/xvfb.log" 2>&1 &
+    echo $! > "$STATE/xvfb.pid"
+    for _ in $(seq 1 30); do [[ -S /tmp/.X11-unix/X97 ]] && break; sleep 0.1; done
+    pid_alive xvfb || { echo "Xvfb failed to start" >&2; cleanup; exit 1; }
+
+    nohup x11vnc -display "$DISPLAY_NUM" -rfbauth "$PASS_FILE" -listen "$TAILSCALE_IP" -rfbport "$VNC_PORT" -forever -shared -noxdamage >"$STATE/vnc.log" 2>&1 &
+    echo $! > "$STATE/vnc.pid"
+    nohup websockify --web=/usr/share/novnc/ "$TAILSCALE_IP:$WEB_PORT" "$TAILSCALE_IP:$VNC_PORT" >"$STATE/web.log" 2>&1 &
+    echo $! > "$STATE/web.pid"
+
+    rm -f "$FIFO"; mkfifo -m 600 "$FIFO"
+    exec 9<>"$FIFO"
+    nohup env HOME=/var/lib/hermes HERMES_HOME=/var/lib/hermes/.hermes PYTHONPATH="$PYTHONPATH_VALUE" DISPLAY="$DISPLAY_NUM" \
+      "$HERMES" meet auth <&9 >"$AUTH_LOG" 2>&1 &
+    echo $! > "$STATE/auth.pid"
+    exec 9>&-
+
+    for _ in $(seq 1 30); do
+      grep -q 'press Enter after' "$AUTH_LOG" 2>/dev/null && break
+      pid_alive auth || break
+      sleep 1
+    done
+    if ! grep -q 'press Enter after' "$AUTH_LOG" 2>/dev/null; then
+      echo "Authentication browser failed to start:" >&2
+      cat "$AUTH_LOG" >&2 || true
+      cleanup
+      exit 1
+    fi
+    show_access
+    ;;
+  save)
+    active || { echo "No active authentication desktop. Start it with: $0 start" >&2; exit 1; }
+    before=0; [[ -f "$AUTH_FILE" ]] && before="$(stat -c %Y "$AUTH_FILE")"
+    printf '\n' > "$FIFO"
+    saved=false
+    for _ in $(seq 1 30); do
+      if grep -q '^saved\.' "$AUTH_LOG" 2>/dev/null; then saved=true; break; fi
+      sleep 1
+    done
+    after=0; [[ -f "$AUTH_FILE" ]] && after="$(stat -c %Y "$AUTH_FILE")"
+    if [[ "$saved" != true || "$after" -lt "$before" ]]; then
+      echo "Authentication state was not saved; leaving VNC running for inspection." >&2
+      cat "$AUTH_LOG" >&2 || true
+      exit 1
+    fi
+    cleanup
+    echo "Google Meet authentication saved and temporary VNC stopped."
+    ;;
+  status)
+    if active; then
+      echo "Authentication desktop is running."
+      [[ -f "$INFO_FILE" ]] && show_access
+    else
+      echo "Authentication desktop is stopped."
+    fi
+    ;;
+  stop)
+    cleanup
+    echo "Temporary authentication VNC stopped and password removed."
+    ;;
+  *)
+    echo "Usage: $0 {start|save|status|stop}" >&2
+    exit 2
+    ;;
+esac
